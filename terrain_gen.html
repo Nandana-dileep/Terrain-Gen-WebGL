@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>CS 418 Terrain project</title>
+    <script src="scene-option-tree.js"></script><!-- handles controls -->
+    <script src="matrices.js"></script>
+
+
+<script>// configures controls
+/**
+ * Modify this object to chose what options you want in the control pane.
+ * Top-level entries become top-section radio buttons.
+ * Nested entries become lower-section inputs of various types.
+ */
+var controlOptions =
+  {"terrain":
+    {"label":"Faulting-method terrain \n(with specular and diffuse lighting)"
+    ,"options":
+      {"resolution":{"type":"number","default":100,"label":"Grid size"}
+      ,"slices":{"type":"number","default":100,"label":"Fractures"}
+      ,"sph_weathering":{"type":"number","default":0.5,"label":"Spheroidal weathering (0 to 1)"}
+      }
+    }
+
+    
+  }
+</script>
+
+<!-- The source code of a vertex shader directly in the HTML. The 'type=' command can have any value except "javascript" and just tells the browser not to try to run the code as javascript. -->
+<script id="vert" type="glsl">
+#version 300 es
+in vec4 position;
+in vec3 normal;
+out vec3 outnormal;
+uniform mat4 p;
+uniform mat4 mv;
+out vec4 pos;
+void main() {
+    gl_Position = p*mv*position;
+    outnormal = normal;
+    pos = position;
+}
+</script>
+    
+    
+<!-- The source code of a fragment shader. -->
+<script id="frag" type="glsl">
+#version 300 es
+precision highp float;
+uniform vec4 color;
+out vec4 fragColor;
+in vec3 outnormal;
+uniform float width;
+uniform float height;
+in vec4 pos;
+uniform vec3 eyedir;
+    
+    
+const vec3 lightdir = vec3(0.8, -0.6, -0.55);
+void main() {
+    vec2 u_resolution = vec2(width, height);
+    vec3 normal = normalize(outnormal);
+    vec3 x = normal * dot(normal, lightdir);
+    vec3 r = 2.0*x - lightdir;
+    float phongbit = max(0.0,dot(r,eyedir));
+    float phong = pow(phongbit, 20.0);
+    float lambert = max(0.0, dot(lightdir, normal));
+
+    
+
+    float st = pos.z;
+
+    vec3 color1 = vec3(0.99,0.15,0);
+    vec3 color2 = vec3(0.16,0.900,0.915);
+
+    
+
+
+    
+    
+   fragColor = vec4((vec3(0.5*cos(st), 0.7*sin(st), 0.1*st) * lambert) + vec3(phong, phong, phong)/15.0, color.a);
+    
+
+    
+}
+</script>
+
+
+<script>// Placeholder script; edit or move to separate file
+const IlliniBlue = new Float32Array([0.075, 0.16, 0.292, 1])
+const IlliniOrange = new Float32Array([1, 0.373, 0.02, 1])
+
+/**
+ * Given the source code of a vertex and fragment shader, compiles them,
+ * and returns the linked program.
+ */
+ function compileAndLinkGLSL(vs_source, fs_source) {
+    let vs = gl.createShader(gl.VERTEX_SHADER)
+    gl.shaderSource(vs, vs_source)
+    gl.compileShader(vs)
+    if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(vs))
+        throw Error("Vertex shader compilation failed")
+    }
+
+    let fs = gl.createShader(gl.FRAGMENT_SHADER)
+    gl.shaderSource(fs, fs_source)
+    gl.compileShader(fs)
+    if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(fs))
+        throw Error("Fragment shader compilation failed")
+    }
+
+    let program = gl.createProgram()
+    gl.attachShader(program, vs)
+    gl.attachShader(program, fs)
+    gl.linkProgram(program)
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(program))
+        throw Error("Linking failed")
+    }
+   
+    return program
+}
+
+/**
+ * Sends per-vertex data to the GPU and connects it to a VS input
+ *
+ * @param data    a 2D array of per-vertex data (e.g. [[x,y,z,w],[x,y,z,w],...])
+ * @param program a compiled and linked GLSL program
+ * @param vsIn    the name of the vertex shader's `in` attribute
+ * @param mode    (optional) gl.STATIC_DRAW, gl.DYNAMIC_DRAW, etc
+ *
+ * @returns the ID of the buffer in GPU memory; useful for changing data later
+ */
+ function supplyDataBuffer(data, program, vsIn, mode) {
+    if (mode === undefined) mode = gl.STATIC_DRAW
+   
+    let buf = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+    let f32 = new Float32Array(data.flat())
+    gl.bufferData(gl.ARRAY_BUFFER, f32, mode)
+   
+    let loc = gl.getAttribLocation(program, vsIn)
+    gl.vertexAttribPointer(loc, data[0].length, gl.FLOAT, false, 0, 0)
+    gl.enableVertexAttribArray(loc)
+   
+    return buf;
+}
+
+
+/**
+ * Creates a Vertex Array Object and puts into it all of the data in the given
+ * JSON structure, which should have the following form:
+ *
+ * ````
+ * {"triangles": a list of of indices of vertices
+ * ,"attributes":
+ *  {name_of_vs_input_1: a list of 1-, 2-, 3-, or 4-vectors, one per vertex
+ *  ,name_of_vs_input_2: a list of 1-, 2-, 3-, or 4-vectors, one per vertex
+ *  }
+ * }
+ * ````
+ *
+ * @returns an object with four keys:
+ *  - mode = the 1st argument for gl.drawElements
+ *  - count = the 2nd argument for gl.drawElements
+ *  - type = the 3rd argument for gl.drawElements
+ *  - vao = the vertex array object for use with gl.bindVertexArray
+ */
+ function setupGeomery(geom, program) {
+    var triangleArray = gl.createVertexArray()
+    gl.bindVertexArray(triangleArray)
+
+    for(let name in geom.attributes) {
+        let data = geom.attributes[name]
+        supplyDataBuffer(data, program, name)
+    }
+
+    var indices = new Uint16Array(geom.triangles.flat())
+    var indexBuffer = gl.createBuffer()
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer)
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW)
+
+    return {
+        mode: gl.TRIANGLES,
+        count: indices.length,
+        type: gl.UNSIGNED_SHORT,
+        vao: triangleArray
+    }
+}
+
+
+/**
+ * Draw one frame
+ */
+function draw() {
+    gl.clearColor(...IlliniBlue) // f(...[1,2,3]) means f(1,2,3)
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT)
+
+    gl.useProgram(program)
+
+    gl.bindVertexArray(geom.vao)
+
+    gl.uniform4fv(gl.getUniformLocation(program, 'color'), IlliniOrange)
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'p'), false, p)
+    gl.uniformMatrix4fv(gl.getUniformLocation(program, 'mv'), false, m4mult(v,m))
+    gl.drawElements(geom.mode, geom.count, geom.type, 0)
+}
+
+/**
+ * Compute any time-varying or animated aspects of the scene
+ */
+function timeStep(milliseconds) {
+    let seconds = milliseconds / 1000;
+    let s2 = Math.cos(seconds/2)-1
+   
+    let eye = [-5*Math.cos(s2),3*Math.sin(s2),-2];
+    window.v = m4view(eye, [0,0,0], [0,0,2])
+    gl.uniform3fv(gl.getUniformLocation(program, 'eyedir'), new Float32Array(m4normalized_(eye)))
+    
+    var widthHandle = gl.getUniformLocation(program, "width");
+    var heightHandle = gl.getUniformLocation(program, "height");
+
+    gl.uniform1f(widthHandle, window.width);
+    gl.uniform1f(heightHandle, window.height);  
+   
+    draw()
+       
+    requestAnimationFrame(timeStep)
+}
+
+/**
+ * Resizes the canvas to completely fill the screen
+ */
+function fillScreen() {
+    let canvas = document.querySelector('canvas')
+    document.body.style.margin = '0'
+    canvas.style.width = '100%'
+    canvas.style.height = '100%'
+    canvas.width = canvas.clientWidth
+    canvas.height = canvas.clientHeight
+    window.width = canvas.clientWidth
+    window.height = canvas.clientHeight
+    canvas.style.width = ''
+    canvas.style.height = ''
+    // to do: update aspect ratio of projection matrix here
+    window.p = m4perspNegZ(1,8, 0.6, canvas.width, canvas.height)
+    if (window.gl) {
+        gl.viewport(0,0, canvas.width, canvas.height)
+        window.p = m4perspNegZ(1,9,1, 8/9)
+        draw()
+    }
+}
+
+function addNormals(data) {
+    let normals = new Array(data.attributes.position.length)
+    for(let i=0; i<normals.length; i+=1) normals[i] = new Array(3).fill(0)
+    for([i0,i1,i2] of data.triangles) {
+        // find the vertex positions
+        //console.log([i0, i1, i2])
+        let p0 = data.attributes.position[i0]
+        let p1 = data.attributes.position[i1]
+        let p2 = data.attributes.position[i2]
+        // find the edge vectors and normal
+        let e0 = m4sub_(p0,p2)
+        let e1 = m4sub_(p1,p2)
+        let n = m4cross_(e0,e1)
+        // loop over x, y and z
+        for(let j=0; j<3; j+=1) {
+            // add a coordinate of a normal to each of the three normals
+            normals[i0][j] += n[j]
+            normals[i1][j] += n[j]
+            normals[i2][j] += n[j]
+        }
+    }
+    for(let i=0; i<normals.length; i+=1) normals[i] = m4normalized_(normals[i])
+    data.attributes.normal = normals;
+}
+
+/**
+ * Compile, link, other option-independent setup
+ */
+async function setup(event) {
+    window.gl = document.querySelector('canvas').getContext('webgl2',
+        // optional configuration object: see https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/getContext
+        {antialias: false, depth:true, preserveDrawingBuffer:true}
+    )
+    // to do: more setup here
+    let vs = document.querySelector('#vert').textContent.trim()
+    let fs = document.querySelector('#frag').textContent.trim()
+    window.program = compileAndLinkGLSL(vs,fs)
+    gl.enable(gl.DEPTH_TEST)
+    window.m = m4ident()
+    window.v = m4ident()
+    window.p = m4ident()
+
+    
+
+    let terr = {
+    "triangles":[],
+    "attributes":{
+        "position":[],
+        "vcolor":[]
+        }
+    }
+    let n = 100
+    for(let i = 0; i < n; i+=1) {
+        for(let j = 0; j < n; j += 1) {
+            terr.attributes.position.push(
+                [i, j, 0]
+            )
+            terr.attributes.vcolor.push(
+                Array.from(IlliniOrange)
+            )
+        }
+    }
+
+    for (let i = 0; i < n-1; i+=1) {
+        for (let j = 0; j < n-1; j+=1) {
+            terr.triangles.push(
+                [i*n + j,
+                 i*n + j+1,
+                 i*n + j+n]
+            )
+        }
+       
+    }
+   
+    for (let i = 1; i < n; i+=1) {
+        for (let j = 1; j < n; j+=1) {
+            terr.triangles.push([i*n + j,i*n + j-1,i*n + j - n])
+        }
+       
+    }
+   
+    let num_faults = 100
+    for (let x = 0; x < num_faults; x += 1) {
+        //generate a random point p in the (x, y) bounds of the grid
+        let p = [(Math.random() * (n)), (Math.random() * (n)), 0]
+
+        // generate a random normal vector using (cosx, sinx, 0) where x is a random angle between 0 and 2pi
+        let theta = (Math.random() * (2*Math.PI))
+        let norm = [Math.cos(theta), Math.sin(theta), 0]
+
+        // for each vertex in the grid, calculate which side of the plane the vertex falls on
+        for (let i = 0; i < n; i += 1) {
+            for (let j = 0; j < n; j += 1) {
+                b = terr.attributes.position[i*n + j]
+                bp = [b[0]-p[0], b[1]-p[1], b[2]-p[2]]
+                dot_prod = bp[0]*norm[0] + bp[1]*norm[1]
+                //console.log(dot_prod)
+                if (dot_prod < 0 ) {
+                   
+                    terr.attributes.position[i*n + j][2] -= 0.7
+             
+                } else if (dot_prod >= 0) {
+                    terr.attributes.position[i*n + j][2] += 0.7
+                   
+                }
+            }
+        }
+    }
+
+    //terr.attributes.position[0][2]-= 2
+    addNormals(terr)
+    //console.log(terr.attributes.normal[3])
+    window.geom = setupGeomery(terr, program)
+
+    requestAnimationFrame(timeStep)
+    fillScreen()
+}
+
+function createTorus(maj_rad, min_rad, num_ring, point_per_ring, terr) {
+
+    //code inspired/derived from https://webglfundamentals.org/webgl/lessons/webgl-qna-how-to-create-a-torus.html
+    for (let slice = 0; slice <= point_per_ring; ++slice) {
+      const v = slice / point_per_ring;
+      const slice_angle = v * 2 * Math.PI;
+      const cos_slices = Math.cos(slice_angle);
+      const sin_slices = Math.sin(slice_angle);
+      const slice_rad = maj_rad + min_rad * cos_slices;
+
+      for (let loop = 0; loop <= num_ring; ++loop) {
+        //   x=(R+r·cos(v))cos(w)
+        //   y=(R+r·cos(v))sin(w)
+        //             z=r.sin(v)
+        const u = loop / num_ring;
+        const loop_angle = u * 2 * Math.PI;
+        const cos_loops = Math.cos(loop_angle);
+        const sin_loops = Math.sin(loop_angle);
+
+        const x = slice_rad * cos_loops;
+        const y = slice_rad * sin_loops;
+        const z = min_rad * sin_slices;
+
+        // terr.vertices.push(x, y, z);
+
+        terr.attributes.position.push(
+                [x, y, z]
+        )
+        terr.attributes.vcolor.push(
+                Array.from(IlliniOrange)
+        )
+      }
+    }
+
+    const vertsPerSlice = num_ring + 1;
+    for (let i = 0; i < point_per_ring; ++i) {
+      let v1 = i * vertsPerSlice;
+      let v2 = v1 + vertsPerSlice;
+
+      for (let j = 0; j < num_ring; ++j) {
+
+        // terr.indices.push(v1);
+        // terr.indices.push(v1 + 1);
+        // terr.indices.push(v2);
+
+        terr.triangles.push(
+                [v1,
+                 v1 + 1,
+                 v2]
+        )
+
+        // terr.indices.push(v2);
+        // terr.indices.push(v1 + 1);
+        // this.indices.push(v2 + 1);
+
+        terr.triangles.push(
+                [v2,
+                 v1+1,
+                 v2+1]
+        )
+
+        v1 += 1;
+        v2 += 1;
+      }
+    }
+    //this.indices = undefined;
+  
+}
+
+
+function createSphere(lat, long, terr) {
+    // code inspired/derived from https://stackoverflow.com/questions/56068635/declaring-the-indices-of-an-uv-sphere
+    this.horizontalDiv = lat;
+    this.verticalDiv = long;
+    
+    
+
+    let horizontalAng = 0;
+    let horizontalDiff = (2 * Math.PI) / this.horizontalDiv;
+
+    let verticalAng = Math.PI / 2;
+    let verticalDiff = -(Math.PI / this.verticalDiv);
+
+    for (var i = 0; i <= this.verticalDiv; i++) {
+
+        let cosVert = Math.cos(verticalAng);
+        let sinVert = Math.sin(verticalAng);
+
+        for (var j = 0; j <= this.horizontalDiv; j++) {
+
+            let cosHor = Math.cos(horizontalAng);
+            let sinHor = Math.sin(horizontalAng);
+
+            // z = (r * cos(verticalAng)) * cos(horizontalAng)
+            // x = (r * cos(verticalAng)) * sin(horizontalAng)
+            // y = r * sin(veritcalAng)
+
+            let x = cosVert * sinHor;
+            let y = sinVert;
+            let z = cosVert * cosHor;
+
+            terr.attributes.position.push(
+                [x, y, z]
+            )
+            terr.attributes.vcolor.push(
+                Array.from(IlliniOrange)
+            )
+            
+
+            
+
+            horizontalAng += horizontalDiff;
+        }
+
+        verticalAng += verticalDiff;
+    }
+
+
+    for (var i = 0; i < this.verticalDiv; i++) {
+      let k1 = i * (this.horizontalDiv + 1);
+      let k2 = k1 + this.horizontalDiv + 1;
+
+      for (var j = 0; j < this.horizontalDiv; j++) {
+
+        if (i != 0) {
+
+          terr.triangles.push(
+                [k1,
+                 k2,
+                 k1+1]
+            )
+        }
+
+        if (i != (this.verticalDiv - 1)) {
+            terr.triangles.push(
+                [k1+1,
+                 k2,
+                 k2+1]
+            )
+        }
+
+        k1++;
+        k2++;
+      }
+    }
+}
+
+function createIcosphere(n, terr) {
+
+    //code inspired from "http://www.songho.ca/opengl/gl_sphere.html#icosphere" and "http://blog.andreaskahler.com/2009/06/creating-icosphere-mesh-in-code.html" and 
+
+    var t = (1.0 + Math.sqrt(5.0)) / 2.0;
+
+    terr.attributes.position.push(
+                [-1,  t,  0]
+    )
+    terr.attributes.position.push(
+                [1,  t,  0]
+    )
+    terr.attributes.position.push(
+                [-1, -t,  0]
+    )
+    terr.attributes.position.push(
+                [1, -t,  0]
+    )
+
+
+    terr.attributes.position.push(
+                [0, -1,  t]
+    )
+    terr.attributes.position.push(
+                [0,  1,  t]
+    )
+    terr.attributes.position.push(
+                [0, -1, -t]
+    )
+    terr.attributes.position.push(
+                [0,  1, -t]
+    )
+
+
+    terr.attributes.position.push(
+                [t,  0, -1]
+    )
+    terr.attributes.position.push(
+                [t,  0,  1]
+    )
+    terr.attributes.position.push(
+                [-t,  0, -1]
+    )
+    terr.attributes.position.push(
+                [-t,  0,  1]
+    )
+
+    for (var i =0; i <=12;i++) {
+        terr.attributes.vcolor.push(
+                Array.from(IlliniOrange)
+        )
+    }
+
+    terr.triangles.push([0, 11, 5])
+    terr.triangles.push([0, 5, 1])
+    terr.triangles.push([0, 1, 7])
+    terr.triangles.push([0, 7, 10])
+    terr.triangles.push([0, 10, 11])
+
+    terr.triangles.push([1, 5, 9])
+    terr.triangles.push([5, 11, 4])
+    terr.triangles.push([11, 10, 2])
+    terr.triangles.push([10, 7, 6])
+    terr.triangles.push([7, 1, 8])
+
+    terr.triangles.push([3, 9, 4])
+    terr.triangles.push([3, 4, 2])
+    terr.triangles.push([3, 2, 6])
+    terr.triangles.push([3, 6, 8])
+    terr.triangles.push([3, 8, 9])
+
+    terr.triangles.push([4, 9, 5])
+    terr.triangles.push([2, 4, 11])
+    terr.triangles.push([6, 2, 10])
+    terr.triangles.push([8, 6, 7])
+    terr.triangles.push([9, 8, 1])
+
+
+    for (var i = 0; i < n; i++) {
+        var triangles2 = []
+
+        for (var j = 0; j < terr.triangles.length; j++) {
+            tri = terr.triangles[j]
+           
+            
+            var a = getMiddlePoint(tri[0], tri[1], terr);
+            var b = getMiddlePoint(tri[1], tri[2], terr);
+            var c = getMiddlePoint(tri[2], tri[0], terr);
+
+            triangles2.push([tri[0], a, c]);
+            triangles2.push([tri[1], b, a]);
+            triangles2.push([tri[2], c, b]);
+            triangles2.push([a, b, c]);
+            console.log(triangles2)
+        }
+            // foreach (var tri in faces) {
+            //     // replace triangle by 4 triangles
+                
+        
+        terr.triangles = triangles2;
+        
+
+    
+
+
+    
+
+
+
+
+    }
+    console.log(terr.triangles)
+
+}
+
+
+
+function getMiddlePoint(p1, p2, terr) {
+    //console.log(p1, p2)
+    // not in cache, calculate it
+    var point1 = terr.attributes.position[p1]
+    var point2 = terr.attributes.position[p2]
+    var middle = [
+            (point1[0] + point2[0]) / 2.0, 
+            (point1[1] + point2[1]) / 2.0, 
+            (point1[2] + point2[2]) / 2.0];
+
+            // add vertex makes sure point is on unit sphere
+          
+    
+    
+    // newV[0] = v1[0] + v2[0];    // x
+    // newV[1] = v1[1] + v2[1];    // y
+    // newV[2] = v1[2] + v2[2];    // z
+    
+    var scale = 1.9 / Math.sqrt(middle[0]*middle[0] + middle[1]*middle[1] + middle[2]*middle[2]);
+    
+    middle[0] *=scale;
+    middle[1] *=scale;
+    middle[2] *=scale;
+    
+
+    terr.attributes.position.push(middle)
+    terr.attributes.vcolor.push(
+                Array.from(IlliniOrange)
+    )
+    console.log(middle)
+
+        
+    return terr.attributes.position.length - 1
+
+}
+/**
+ * Generate geometry, render the scene
+ */
+async function setupScene(scene, options) {
+    console.log("To do: render",scene,"with options",options)
+    
+
+    window.gl = document.querySelector('canvas').getContext('webgl2',
+        // optional configuration object: see https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/getContext
+        {antialias: false, depth:true, preserveDrawingBuffer:true}
+    )
+    let vs = document.querySelector('#vert').textContent.trim()
+    let fs = document.querySelector('#frag').textContent.trim()
+    window.program = compileAndLinkGLSL(vs,fs)
+    gl.enable(gl.DEPTH_TEST)
+    window.m = m4ident()
+    window.v = m4ident()
+    window.p = m4ident()
+    let terr = {
+    "triangles":[],
+    "attributes":{
+        "position":[],
+        "vcolor":[]
+        }
+    }
+
+    if (scene == "torus") {
+        createTorus(options.r1, options.r2, options.res1, options.res2, terr)
+        addNormals(terr)
+
+        window.geom = setupGeomery(terr, program)
+        requestAnimationFrame(timeStep)
+        fillScreen()
+
+        return
+    } else if (scene == "uv-sphere") {
+        createSphere(options.r1, options.r2, terr)
+        addNormals(terr)
+
+        window.geom = setupGeomery(terr, program)
+        requestAnimationFrame(timeStep)
+        fillScreen()
+
+        return
+    } else if (scene == "icosphere") {
+        createIcosphere(options.r1, terr)
+        addNormals(terr)
+
+        window.geom = setupGeomery(terr, program)
+        requestAnimationFrame(timeStep)
+        fillScreen()
+
+        return
+    }
+    let n = Math.round(options.resolution *options.sph_weathering)
+    for(let i = 0; i < n; i+=1) {
+        for(let j = 0; j < n; j += 1) {
+            terr.attributes.position.push(
+                [i, j, 0]
+            )
+            terr.attributes.vcolor.push(
+                Array.from(IlliniOrange)
+            )
+        }
+    }
+
+    for (let i = 0; i < n-1; i+=1) {
+        for (let j = 0; j < n-1; j+=1) {
+            terr.triangles.push(
+                [i*n + j,
+                 i*n + j+1,
+                 i*n + j+n]
+            )
+        }
+       
+    }
+   
+    for (let i = 1; i < n; i+=1) {
+        for (let j = 1; j < n; j+=1) {
+            terr.triangles.push([i*n + j,i*n + j-1,i*n + j - n])
+        }
+       
+    }
+   
+    let num_faults = options.slices
+    for (let x = 0; x < num_faults; x += 1) {
+        //generate a random point p in the (x, y) bounds of the grid
+        let p = [(Math.random() * (n)), (Math.random() * (n)), 0]
+
+        // generate a random normal vector using (cosx, sinx, 0) where x is a random angle between 0 and 2pi
+        let theta = (Math.random() * (2*Math.PI))
+        let norm = [Math.cos(theta), Math.sin(theta), 0]
+
+        // for each vertex in the grid, calculate which side of the plane the vertex falls on
+        for (let i = 0; i < n; i += 1) {
+            for (let j = 0; j < n; j += 1) {
+                b = terr.attributes.position[i*n + j]
+                bp = [b[0]-p[0], b[1]-p[1], b[2]-p[2]]
+                dot_prod = bp[0]*norm[0] + bp[1]*norm[1]
+                //console.log(dot_prod)
+                if (dot_prod < 0 ) {
+                   
+                    terr.attributes.position[i*n + j][2] -= 0.4
+             
+                } else if (dot_prod >= 0) {
+                    terr.attributes.position[i*n + j][2] += 0.4
+                   
+                }
+            }
+        }
+    }
+
+    //terr.attributes.position[0][2]-= 2
+    addNormals(terr)
+    //console.log(terr.attributes.normal[3])
+    window.geom = setupGeomery(terr, program)
+
+    requestAnimationFrame(timeStep)
+    fillScreen()
+}
+
+window.addEventListener('load', setup)
+window.addEventListener('resize', fillScreen)
+</script>
+
+
+
+<style>
+    body { margin: 0; border: none; padding: 0; display: flex; }
+    .controls {
+        width: min(50%, 20em); padding: 1em;
+        flex: 0 0 min(50%, 20em);
+    }
+    .controls label { display: block; }
+    .display {
+        flex-grow: 1; height: 100vh;
+        line-height: 0rem;
+    }
+</style>
+</head>
+<body>
+    <div class="controls">
+        <form>
+        <div id="set1"></div>
+        <hr/>
+        <div id="set2"></div>
+        <hr/>
+        <input type="submit" value="Generate object"/>
+        </form>
+    </div>
+    <div class="display"><canvas width="500" height="500"></canvas></div>
+</body>
+</html>
